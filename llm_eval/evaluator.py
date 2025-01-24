@@ -65,6 +65,11 @@ class Evaluator:
         model_params: Optional[Dict[str, Any]] = None,
         scaling_params: Optional[Dict[str, Any]] = None,
         evaluator_params: Optional[Dict[str, Any]] = None,
+        
+        
+        device:str=None,
+        model_name:str=None
+
     ) -> Dict[str, Any]:
         """
         실제로 LLM 평가 파이프라인을 실행하는 함수.
@@ -100,17 +105,21 @@ class Evaluator:
             model_backend_params=model_params or {},
             scaling_params=scaling_params or {},
             evaluator_params=evaluator_params or {},
+            device=device,
+            model_name=model_name
         )
         results = runner.run()
         return results
 
 def main():
     parser = argparse.ArgumentParser(description="Simple LLM Evaluator CLI")
-    parser.add_argument("--model", type=str, default=None, help="Model backend name (registry key)")
+    parser.add_argument("--model", type=str, default="huggingface", help="Model backend name (registry key)")
+    parser.add_argument("--model_name", type=str, default="facebook/opt-350m")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--dataset", type=str, default="haerae_bench", help="Dataset name (registry key)")
     parser.add_argument("--subset", type=str, default=None, help="Dataset subset/config")
     parser.add_argument("--split", type=str, default="test", help="Dataset split (train/valid/test)")
-    parser.add_argument("--scaling_method", type=str, default=None, help="Scaling method name (registry key)")
+    parser.add_argument("--scaling_method", type=str, default="best_of_n", help="Scaling method name (registry key)")
     parser.add_argument("--evaluation_method", type=str, default="string_match", help="Evaluation method name")
     parser.add_argument("--output_file", type=str, default=None, help="Where to store results (JSON)")
 
@@ -119,7 +128,7 @@ def main():
     parser.add_argument("--model_params", type=str, default=None, help="JSON string for model params")
     parser.add_argument("--scaling_params", type=str, default=None, help="JSON string for scaling params")
     parser.add_argument("--evaluator_params", type=str, default=None, help="JSON string for evaluator params")
-
+    
     args = parser.parse_args()
 
     # JSON 파싱
@@ -140,6 +149,10 @@ def main():
         model_params=model_params,
         scaling_params=scaling_params,
         evaluator_params=evaluator_params,
+
+        device=args.device,
+        model_name=args.model_name
+
     )
 
     if args.output_file:

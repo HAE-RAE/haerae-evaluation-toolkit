@@ -2,6 +2,8 @@ from typing import List, Dict, Any
 from llm_eval.models.base import BaseModel
 from .base import BaseScalingMethod
 from . import register_scaling_method
+from transformers import pipeline
+#
 
 @register_scaling_method("best_of_n")
 class BestOfN(BaseScalingMethod):
@@ -10,10 +12,14 @@ class BestOfN(BaseScalingMethod):
     * "우수" 판단은 score_fn으로 할 수도 있고, default로 첫 번째만 택할 수도 있음.
     """
 
-    def __init__(self, model: BaseModel = None, n: int = 5, score_fn=None, **kwargs):
+    def __init__(self, model: BaseModel = None, n: int = 5, score_fn="heegyu/ko-reward-model-1.3b-v0.1", **kwargs):
         super().__init__(model=model, **kwargs)
+
         self.n = n
         self.score_fn = score_fn
+        
+        self.reward_model = pipeline("text-classification", model=self.score_fn)
+        
 
     def apply(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -23,7 +29,7 @@ class BestOfN(BaseScalingMethod):
         """
         if self.model is None:
             raise ValueError("BestOfN requires a 'model' instance.")
-
+        
         for sample in data:
             prompt = sample["input"]
             # N번 후보 생성 (batch 호출로 최적화 가능)
@@ -34,11 +40,31 @@ class BestOfN(BaseScalingMethod):
                 # 예: [{"input":..., "reference":..., "prediction":"..."}]
                 candidate_text = outputs[0]["prediction"]
                 candidates.append(candidate_text)
+                
 
             # 점수 계산하여 베스트 후보 선택
             if self.score_fn is not None:
-                scores = [self.score_fn(candidate, sample) for candidate in candidates]
-                best_idx = max(range(len(scores)), key=lambda i: scores[i])
+
+                score_list=[]
+
+                for candidate_text in candidates:
+                    """
+                    scores = [self.score_fn(candidate, sample) for candidate in candidates]
+                    best_idx = max(range(len(scores)), key=lambda i: scores[i])
+                    """
+                    template=f"""<human>:
+                    {prompt}
+                    <bot>:
+                    {candidate_text}
+                    <|endoftext|>
+                    """
+                    score=float(self.reward_model(template)[0]["score"])
+                    score_list.append(score)
+                    
+                    
+
+                best_idx=max(range(len(score_list)), key=lambda i: float(score_list[i]))
+
             else:
                 # default: 첫 번째 후보
                 best_idx = 0

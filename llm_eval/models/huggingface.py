@@ -23,11 +23,11 @@ class HuggingFaceModel(BaseModel):
         (ex: "logits": {"sum_log_prob": float, "token_log_probs": [...], "tokens": [...]} )
       - cot_parser를 통해 chain_of_thought와 최종 answer를 분리 (예: "Final Answer:" 구분 등).
     """
-
+#model_name_or_path: str="facebook/opt-350m",
     def __init__(
         self,
-        model_name_or_path: str,
-        device: str = "cpu",
+        model_name_or_path,
+        device: str = "cuda",
         max_new_tokens: int = 128,
         cot_trigger: Optional[str] = "Let's think step by step.",
         temperature: float = 1.0,

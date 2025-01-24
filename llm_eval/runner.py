@@ -36,6 +36,10 @@ class PipelineRunner:
         model_backend_params: Optional[Dict[str, Any]] = None,
         scaling_params: Optional[Dict[str, Any]] = None,
         evaluator_params: Optional[Dict[str, Any]] = None,
+
+
+        device : str = None,
+        model_name: str = None,
     ):
         """
         Args:
@@ -51,6 +55,10 @@ class PipelineRunner:
             scaling_params (dict): 스케일링 메서드 초기화 시 파라미터 (beam_size, n 등)
             evaluator_params (dict): evaluator 초기화 시 필요한 파라미터
         """
+        
+        self.device=device 
+        self.model_name=model_name
+
         self.dataset_name = dataset_name
         self.subset = subset
         self.split = split
@@ -92,7 +100,7 @@ class PipelineRunner:
 
         # 2) Model
         logger.info(f"[Pipeline] Loading model backend: {self.model_backend_name} with {self.model_backend_params}")
-        self.model = load_model(self.model_backend_name, **self.model_backend_params)
+        self.model = load_model(self.model_backend_name, self.device, self.model_name, **self.model_backend_params)
 
         # 3) Scaling Method (optional)
         if self.scaling_method_name:

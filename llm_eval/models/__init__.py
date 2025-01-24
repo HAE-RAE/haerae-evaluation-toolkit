@@ -23,9 +23,8 @@ def register_model(name: str):
 
     return decorator
 
-
 # 3) 레지스트리에서 model 인스턴스를 생성하는 함수
-def load_model(name: str, **kwargs) -> BaseModel:
+def load_model(name: str, device,model_name,**kwargs) -> BaseModel:
     """
     문자열 name을 받아 해당 모델 클래스를 찾아 인스턴스화 후 반환.
     """
@@ -34,7 +33,7 @@ def load_model(name: str, **kwargs) -> BaseModel:
             f"Unknown model: {name}. Please register it in MODEL_REGISTRY."
         )
     model_cls = MODEL_REGISTRY[name]
-    return model_cls(**kwargs)
+    return model_cls(model_name_or_path=model_name,device=device,**kwargs)
 
 
 # 5) 실제 backend들 import -> 데코레이터로 등록
