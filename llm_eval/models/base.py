@@ -49,6 +49,26 @@ class BaseModel:
         """
         raise NotImplementedError("Subclasses must implement generate_batch().")
     
+    def generate_until(
+        self,
+        prompt: str,
+        stop_sequences: List[str],
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> str:
+        """특정 시퀀스가 나올 때까지 텍스트 생성
+        
+        Args:
+            prompt (str): 입력 프롬프트 텍스트
+            stop_sequences (List[str]): 생성을 중단할 시퀀스 목록
+            max_tokens (Optional[int]): 생성할 최대 토큰 수
+            **kwargs: 추가 생성 파라미터
+
+        Returns:
+            str: 생성된 텍스트
+        """
+        raise NotImplementedError
+    
 class BaseJudge:
     """
     Judge 모델(LLM-as-a-Judge) 기본 추상 클래스.

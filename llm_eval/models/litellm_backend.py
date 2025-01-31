@@ -184,3 +184,37 @@ class LiteLLMBackend(BaseModel):
             })
 
         return results
+    def generate_until(
+        self,
+        prompt: str, 
+        stop_sequences: List[str],
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> str:
+        """LiteLLM을 사용하여 특정 시퀀스가 나올 때까지 텍스트 생성
+        
+        Args:
+            prompt (str): 입력 프롬프트 텍스트
+            stop_sequences (List[str]): 생성을 중단할 시퀀스 목록
+            max_tokens (Optional[int]): 생성할 최대 토큰 수. 
+                None인 경우 기본값 사용
+            **kwargs: 추가 생성 파라미터
+
+        Returns:
+            str: 생성된 텍스트
+        """
+        completion_kwargs = self._prepare_completion_kwargs(prompt)
+        
+        # Override max_tokens if specified
+        if max_tokens is not None:
+            completion_kwargs["max_tokens"] = max_tokens
+            
+        # Add stop sequences
+        completion_kwargs["stop"] = stop_sequences
+        
+        try:
+            response = self._generate_with_retry(completion_kwargs)
+            return response
+        except Exception as e:
+            logger.error(f"Error in generate_until: {str(e)}")
+            raise

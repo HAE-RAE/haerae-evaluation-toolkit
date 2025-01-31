@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional, Callable, Tuple, Union
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
+from transformers import StoppingCriteria, StoppingCriteriaList
 from .base import BaseModel
 from . import register_model
 from llm_eval.utils.logging import get_logger
@@ -12,6 +12,15 @@ from llm_eval.utils.prompt_template import extract_final_answer
 
 logger = get_logger(name="huggingface", level=logging.INFO)
 
+class KeywordsStoppingCriteria(StoppingCriteria):
+    def __init__(self, stop_sequences: List[str], tokenizer):
+        super().__init__()
+        self.stop_sequences = stop_sequences
+        self.tokenizer = tokenizer
+    
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        generated = self.tokenizer.decode(input_ids[0])
+        return any(stop_seq in generated for stop_seq in self.stop_sequences)
 
 @register_model("huggingface")
 class HuggingFaceModel(BaseModel):
@@ -227,3 +236,43 @@ class HuggingFaceModel(BaseModel):
                 else:
                     logger.error("A RuntimeError occurred:", exc_info=True)
                     raise
+
+    def generate_until(
+        self,
+        prompt: str,
+        stop_sequences: List[str],
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> str:
+        """HuggingFace 모델을 사용하여 특정 시퀀스가 나올 때까지 텍스트 생성
+        
+        Args:
+            prompt (str): 입력 프롬프트 텍스트
+            stop_sequences (List[str]): 생성을 중단할 시퀀스 목록
+            max_tokens (Optional[int]): 생성할 최대 토큰 수.
+                None인 경우 self.max_new_tokens 사용
+            **kwargs: 추가적인 모델 생성 파라미터
+
+        Returns:
+            str: 프롬프트를 제외한 생성된 텍스트
+        """
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        if self.device != "cpu":
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+        max_new_tokens = max_tokens or self.max_new_tokens
+        
+        # Generate
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=self.tokenizer.eos_token_id,
+            stopping_criteria=StoppingCriteriaList([
+                KeywordsStoppingCriteria(stop_sequences, self.tokenizer)
+            ]),
+            **kwargs
+        )
+        
+        # Decode and remove prompt
+        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return generated_text[len(prompt):]

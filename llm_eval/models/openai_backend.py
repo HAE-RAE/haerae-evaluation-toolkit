@@ -284,3 +284,40 @@ class OpenAIModel(BaseModel):
             outputs.append(output_item)
 
         return outputs
+    def generate_until(
+        self,
+        prompt: str,
+        stop_sequences: List[str],
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> str:
+        """OpenAI API를 사용하여 특정 시퀀스가 나올 때까지 텍스트 생성
+        
+        Args:
+            prompt (str): 입력 프롬프트 텍스트
+            stop_sequences (List[str]): 생성을 중단할 시퀀스 목록
+            max_tokens (Optional[int]): 생성할 최대 토큰 수.
+                None인 경우 self.max_tokens 사용
+            **kwargs: 추가적인 API 파라미터
+
+        Returns:
+            str: 생성된 텍스트
+        """
+        completion_kwargs = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.temperature,
+            "stop": stop_sequences,
+        }
+        
+        if max_tokens is not None:
+            completion_kwargs["max_tokens"] = max_tokens
+        else:
+            completion_kwargs["max_tokens"] = self.max_tokens
+            
+        try:
+            response = self.client.chat.completions.create(**completion_kwargs)
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Error in generate_until: {str(e)}")
+            raise
