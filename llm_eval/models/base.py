@@ -1,5 +1,7 @@
-from typing import List, Dict, Any, Optional, Union, Callable, Tuple
-from llm_eval.utils.prompt_template import extract_final_answer
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+from llm_eval.utils.prompt_template import default_cot_parser
+
 
 class BaseModel:
     """
@@ -9,16 +11,17 @@ class BaseModel:
       - generate_batch(self, inputs, return_logits=False) -> List[Dict[str, Any]]
         * inputs: [{"input": str, "reference": str, ...}, ...]
 
-        * Returns: [{"input":..., "reference":..., 
+        * Returns: [{"input":..., "reference":...,
                       "prediction":...,        # Final string output from the model
                       "logits": (optional)..., # if return_logits=True
                       ...}, ...]
     """
-    
+
     def __init__(
         self,
         cot_trigger: Optional[str] = "Let's think step by step.",
-        cot_parser: Optional[Callable[[str], Tuple[str, str]]] = extract_final_answer,
+        cot_parser: Optional[Callable[[str],
+                                      Tuple[str, str]]] = default_cot_parser,
         **kwargs
     ):
         # Parameters received when calling super().__init__(...) in a subclass
@@ -54,14 +57,17 @@ class BaseModel:
               ...
             ]
         """
-        raise NotImplementedError("Subclasses must implement generate_batch().")
-    
+        raise NotImplementedError(
+            "Subclasses must implement generate_batch().")
+
+
 class BaseJudge:
     """
     Abstract base class for the Judge model (LLM-as-a-Judge).
     It takes generated text (answers) as input and evaluates their quality/appropriateness.
     For example, it can be used for chain-of-thought based self-consistency evaluation, star ratings (1-5 points), etc.
     """
+
     def __init__(self, **kwargs):
         pass
 
@@ -80,11 +86,13 @@ class BaseJudge:
         """
         raise NotImplementedError("Subclasses must implement judge_batch().")
 
+
 class BaseRewardModel:
     """
     Abstract class dedicated to Reward models (usable in DVTS, etc.).
     It estimates a scalar reward value from a text answer.
     """
+
     def __init__(self, **kwargs):
         pass
 
