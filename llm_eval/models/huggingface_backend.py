@@ -7,6 +7,17 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from transformers import StoppingCriteria, StoppingCriteriaList
 from tqdm import tqdm
 
+try:
+    from transformers import AutoProcessor
+    from PIL import Image
+    import requests
+    VISION_AVAILABLE = True
+except ImportError:
+    AutoProcessor = None
+    Image = None
+    requests = None
+    VISION_AVAILABLE = False
+
 from .base import BaseModel 
 from . import register_model
 from llm_eval.utils.logging import get_logger 
@@ -27,6 +38,7 @@ class HuggingFaceModel(BaseModel):
       - If an input contains an "options" field (MCQA mode), the log likelihood for each option is computed.
         The option with the highest log probability is selected as the final prediction.
       - If `device="map"`, uses `device_map="auto"` for distributed model loading.
+      - Supports vision-language models when `is_vision_model=True` is set.
     
     Args:
         model_name_or_path (str): HF Hub model ID or local path.
@@ -39,6 +51,7 @@ class HuggingFaceModel(BaseModel):
         stop_token (str|None): Optional stop token. If None, no stopping.
         device (str|None): 'cpu', 'cuda', 'cuda:0', 'map', etc. If None, uses the model's device.
                          If "map", uses device_map="auto".
+        is_vision_model (bool): Whether this is a vision-language model.
         cot (bool): Whether to use chain-of-thought prompting.
         cot_trigger (str|None): Optional CoT (Chain-of-Thought) trigger appended to the prompt. If None, no CoT trigger.
         cot_parser (callable|None): A function that takes a string (generated text) and returns a tuple 
@@ -59,6 +72,7 @@ class HuggingFaceModel(BaseModel):
         stop_token: Optional[str] = None, # Not used in this snippet but kept for consistency
         device: Optional[str] = None,
         batch_size: int = 1,
+        is_vision_model: bool = False,
         cot: bool = False,
         cot_trigger: Optional[str] = "Let's think step by step.",
         cot_parser: Optional[Callable[[str], Tuple[str, str]]] = default_cot_parser,
@@ -69,7 +83,13 @@ class HuggingFaceModel(BaseModel):
         
         # Extract model name from model ID
         self.model_name = f"huggingface:{model_name_or_path}"
-        logger.info(f"[HuggingFaceModel] Initializing with model: {model_name_or_path}")
+        self.is_vision_model = is_vision_model
+        logger.info(f"[HuggingFaceModel] Initializing with model: {model_name_or_path}, vision_model: {is_vision_model}")
+
+        # Check vision dependencies
+        if self.is_vision_model and not VISION_AVAILABLE:
+            raise ImportError("Vision model requested but required dependencies (PIL, requests) are not available. "
+                            "Please install them with: pip install Pillow requests")
 
         # Dtype setup
         if dtype == "auto":
@@ -87,24 +107,56 @@ class HuggingFaceModel(BaseModel):
         self.device_arg = device # Store the original device argument
         self.is_model_distributed = False
 
-        # Load tokenizer
+        # Load tokenizer/processor
         _tokenizer_path = tokenizer_id_or_path if tokenizer_id_or_path else model_name_or_path
-        self.tokenizer = AutoTokenizer.from_pretrained(_tokenizer_path, padding_side="left")
+        
+        if self.is_vision_model:
+            # For vision models, try to load processor first, fallback to tokenizer
+            try:
+                self.processor = AutoProcessor.from_pretrained(_tokenizer_path)
+                self.tokenizer = self.processor.tokenizer if hasattr(self.processor, 'tokenizer') else self.processor
+                logger.info(f"[HuggingFaceModel] Loaded processor for vision model")
+            except Exception as e:
+                logger.warning(f"Failed to load processor, falling back to tokenizer: {e}")
+                self.processor = None
+                self.tokenizer = AutoTokenizer.from_pretrained(_tokenizer_path, padding_side="left")
+        else:
+            self.processor = None
+            self.tokenizer = AutoTokenizer.from_pretrained(_tokenizer_path, padding_side="left")
+        
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             logger.info(f"[HuggingFaceModel] Tokenizer pad_token set to eos_token: {self.tokenizer.eos_token}")
-
 
         # Load model
         logger.info(f"[HuggingFaceModel] Loading model from {model_name_or_path} with dtype: {torch_dtype}")
         if device == "map":
             logger.info("[HuggingFaceModel] Using device_map='auto' for model loading.")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name_or_path,
-                device_map="auto",
-                torch_dtype=torch_dtype,
-                **kwargs.get("model_kwargs", {}) # Pass other model specific kwargs
-            )
+            if self.is_vision_model:
+                # For vision models, we might need different model classes
+                try:
+                    from transformers import AutoModelForVision2Seq
+                    self.model = AutoModelForVision2Seq.from_pretrained(
+                        model_name_or_path,
+                        device_map="auto",
+                        torch_dtype=torch_dtype,
+                        **kwargs.get("model_kwargs", {})
+                    )
+                except ImportError:
+                    logger.warning("AutoModelForVision2Seq not available, using AutoModelForCausalLM")
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name_or_path,
+                        device_map="auto",
+                        torch_dtype=torch_dtype,
+                        **kwargs.get("model_kwargs", {})
+                    )
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name_or_path,
+                    device_map="auto",
+                    torch_dtype=torch_dtype,
+                    **kwargs.get("model_kwargs", {}) # Pass other model specific kwargs
+                )
             self.is_model_distributed = True
             # For distributed models, input tensors are typically kept on CPU.
             # The model's internal logic handles moving parts of the computation to appropriate devices.
@@ -112,11 +164,27 @@ class HuggingFaceModel(BaseModel):
             self.device = self.model.device # This might be e.g., 'cuda:0' for the first shard
             logger.info(f"[HuggingFaceModel] Model distributed. Main device (first shard): {self.device}")
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name_or_path,
-                torch_dtype=torch_dtype,
-                **kwargs.get("model_kwargs", {}) # Pass other model specific kwargs
-            )
+            if self.is_vision_model:
+                try:
+                    from transformers import AutoModelForVision2Seq
+                    self.model = AutoModelForVision2Seq.from_pretrained(
+                        model_name_or_path,
+                        torch_dtype=torch_dtype,
+                        **kwargs.get("model_kwargs", {})
+                    )
+                except ImportError:
+                    logger.warning("AutoModelForVision2Seq not available, using AutoModelForCausalLM")
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name_or_path,
+                        torch_dtype=torch_dtype,
+                        **kwargs.get("model_kwargs", {})
+                    )
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name_or_path,
+                    torch_dtype=torch_dtype,
+                    **kwargs.get("model_kwargs", {}) # Pass other model specific kwargs
+                )
             self.device = device
             if self.device:
                 logger.info(f"[HuggingFaceModel] Moving model to device: {self.device}")
@@ -127,7 +195,6 @@ class HuggingFaceModel(BaseModel):
                     self.device = "cpu"
                     self.model.to(self.device) # Fallback to CPU
             else: # device is None
-
                 self.device = self.model.device # Get the device it was loaded on
                 logger.info(f"[HuggingFaceModel] Model device not specified, loaded on: {self.device}")
         
@@ -142,6 +209,112 @@ class HuggingFaceModel(BaseModel):
         self.cot_trigger = cot_trigger
         self.cot_parser = cot_parser
         self.batch_size = batch_size
+
+    def _load_image(self, image_input: Union[str, Image.Image]) -> Image.Image:
+        """
+        Load an image from various input formats.
+        
+        Args:
+            image_input: Can be a file path, URL, or PIL Image
+            
+        Returns:
+            PIL Image object
+        """
+        if not VISION_AVAILABLE:
+            raise ImportError("Vision dependencies not available")
+            
+        if isinstance(image_input, Image.Image):
+            return image_input
+        elif isinstance(image_input, str):
+            if image_input.startswith(('http://', 'https://')):
+                # URL
+                try:
+                    response = requests.get(image_input)
+                    response.raise_for_status()
+                    return Image.open(requests.get(image_input, stream=True).raw)
+                except Exception as e:
+                    logger.error(f"Failed to load image from URL {image_input}: {e}")
+                    raise
+            else:
+                # File path
+                try:
+                    return Image.open(image_input)
+                except Exception as e:
+                    logger.error(f"Failed to load image from file {image_input}: {e}")
+                    raise
+        else:
+            raise ValueError(f"Unsupported image input type: {type(image_input)}")
+
+    def _prepare_vision_inputs(self, text: str, images: List, **kwargs) -> Dict[str, Any]:
+        """
+        Prepare inputs for vision-language models.
+        
+        Args:
+            text: Text prompt
+            images: List of images
+            **kwargs: Additional arguments
+            
+        Returns:
+            Dictionary of prepared inputs
+        """
+        if not self.is_vision_model or not images:
+            # Fallback to text-only processing
+            return self.tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 2048
+            )
+        
+        # Load images
+        pil_images = []
+        for img in images:
+            try:
+                pil_images.append(self._load_image(img))
+            except Exception as e:
+                logger.warning(f"Failed to load image {img}: {e}, skipping")
+                continue
+        
+        if not pil_images:
+            logger.warning("No valid images found, falling back to text-only")
+            return self.tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 2048
+            )
+        
+        # Use processor if available
+        if self.processor:
+            try:
+                return self.processor(
+                    text=text,
+                    images=pil_images,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True
+                )
+            except Exception as e:
+                logger.error(f"Processor failed: {e}, falling back to tokenizer")
+                return self.tokenizer(
+                    text,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 2048
+                )
+        else:
+            # No processor available, use tokenizer only
+            logger.warning("No processor available for vision model, using text-only tokenizer")
+            return self.tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 2048
+            )
 
     def _score_option(self, prompt: str, option: str) -> float:
         """
@@ -408,16 +581,28 @@ class HuggingFaceModel(BaseModel):
         
         results = []
         
-        # Tokenize prompts
-        # Tokenizer by default puts tensors on CPU
-        encoded = self.tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True, # Ensure truncation if prompts are too long
-            max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 2048 # Default max length
-        )
-        input_lens = encoded["attention_mask"].sum(dim=1).tolist()
+        # Handle vision inputs if this is a vision model
+        if self.is_vision_model and len(batch_items_original) == 1:
+            # For vision models, process one item at a time for now
+            item = batch_items_original[0]
+            text_input, images = self._extract_text_and_images(item)
+            
+            # Use the preprocessed prompt if available, otherwise use extracted text
+            if prompts:
+                text_input = prompts[0]
+            
+            encoded = self._prepare_vision_inputs(text_input, images)
+            input_lens = [encoded["attention_mask"].sum(dim=1).item()] if "attention_mask" in encoded else [len(encoded.get("input_ids", []))]
+        else:
+            # Standard text-only processing
+            encoded = self.tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True, # Ensure truncation if prompts are too long
+                max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 2048 # Default max length
+            )
+            input_lens = encoded["attention_mask"].sum(dim=1).tolist()
         
         # Move to device if not distributed. If distributed, inputs stay on CPU.
         # The model.generate() call handles internal transfers.
