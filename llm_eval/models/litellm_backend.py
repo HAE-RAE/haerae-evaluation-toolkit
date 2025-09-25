@@ -48,6 +48,7 @@ class LiteLLMBackend(BaseModel):
         max_new_tokens: int = 128,
         temperature: float = 0.7,
         batch_size: int = 8,
+        is_vision_model: bool = False,
         cot: bool = False,
         cot_trigger: Optional[str] = None,
         cot_parser: Optional[Callable[[str], Tuple[str, str]]] = default_cot_parser,
@@ -61,6 +62,7 @@ class LiteLLMBackend(BaseModel):
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.batch_size = batch_size
+        self.is_vision_model = is_vision_model
         self.cot = cot
         self.cot_trigger = cot_trigger
         self.cot_parser = cot_parser
@@ -85,12 +87,76 @@ class LiteLLMBackend(BaseModel):
         elif self.provider == "anthropic" and anthropic_api_key is not None:
             self.completion_kwargs["api_key"] = anthropic_api_key
 
-    def _prepare_completion_kwargs(self, prompt: str, until: Optional[Union[str, List[str]]] = None) -> Dict[str, Any]:
+    def _process_image_for_litellm(self, image_input: Union[str, Dict]) -> Dict[str, Any]:
+        """
+        Process image input for LiteLLM format.
+        
+        Args:
+            image_input: Image URL, file path, or dict with image info
+            
+        Returns:
+            Dict formatted for LiteLLM vision models
+        """
+        if isinstance(image_input, str):
+            if image_input.startswith(('http://', 'https://')):
+                # URL
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": image_input}
+                }
+            elif image_input.startswith('data:image/'):
+                # Base64 data URL
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": image_input}
+                }
+            else:
+                # File path - convert to base64
+                import base64
+                import mimetypes
+                try:
+                    with open(image_input, 'rb') as image_file:
+                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                        mime_type = mimetypes.guess_type(image_input)[0] or 'image/jpeg'
+                        return {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{encoded_string}"}
+                        }
+                except Exception as e:
+                    logger.error(f"Failed to process image file {image_input}: {e}")
+                    return {
+                        "type": "text",
+                        "text": f"[Error processing image: {image_input}]"
+                    }
+        elif isinstance(image_input, dict):
+            # Already in correct format or needs adjustment
+            if "type" in image_input:
+                return image_input
+            elif "url" in image_input:
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": image_input["url"]}
+                }
+            else:
+                logger.warning(f"Unknown image format: {image_input}")
+                return {
+                    "type": "text",
+                    "text": f"[Unknown image format: {image_input}]"
+                }
+        else:
+            logger.warning(f"Unsupported image type: {type(image_input)}")
+            return {
+                "type": "text",
+                "text": f"[Unsupported image type: {type(image_input)}]"
+            }
+
+    def _prepare_completion_kwargs(self, prompt: str, images: Optional[List] = None, until: Optional[Union[str, List[str]]] = None) -> Dict[str, Any]:
         """
         Prepares the parameters to pass to the LiteLLM completion function.
         
         Args:
             prompt (str): The input prompt text.
+            images (Optional[List]): Optional list of images for vision models.
             until (Optional[Union[str, List[str]]]): Optional stop sequence(s).
         
         Returns:
@@ -99,9 +165,18 @@ class LiteLLMBackend(BaseModel):
         # Append the CoT trigger if chain-of-thought is enabled.
         if self.cot and self.cot_trigger:
             prompt = f"{prompt}\n{self.cot_trigger}"
+        
+        # Handle vision inputs
+        if images and self.is_vision_model:
+            content = [{"type": "text", "text": prompt}]
+            for image in images:
+                content.append(self._process_image_for_litellm(image))
+            messages = [{"role": "user", "content": content}]
+        else:
+            messages = [{"role": "user", "content": prompt}]
             
         completion_kwargs = {
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "max_tokens": self.max_new_tokens,
             "temperature": self.temperature,
             **self.completion_kwargs,
@@ -189,9 +264,10 @@ class LiteLLMBackend(BaseModel):
         semaphore = asyncio.Semaphore(self.batch_size if isinstance(self.batch_size, int) else 8)
 
         async def _worker(item: Dict[str, Any]) -> Dict[str, Any]:
-            prompt = item.get("input", "")
+            # Extract text and images from the item
+            text_input, images = self._extract_text_and_images(item)
             reference = item.get("reference", "")
-            completion_kwargs = self._prepare_completion_kwargs(prompt, until=until)
+            completion_kwargs = self._prepare_completion_kwargs(text_input, images=images, until=until)
             async with semaphore:
                 try:
                     prediction = await self._generate_with_retry_async(

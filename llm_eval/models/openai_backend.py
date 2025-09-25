@@ -103,12 +103,62 @@ class OpenAIModel(BaseModel):
         Returns:
             Dict[str, Any]: Processed image information.
         """
-        # Implementation omitted for brevity.
-        pass
+        if isinstance(content, str):
+            # Assume it's either a URL or base64 string
+            if content.startswith(('http://', 'https://')):
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": content}
+                }
+            elif content.startswith('data:image/'):
+                return {
+                    "type": "image_url", 
+                    "image_url": {"url": content}
+                }
+            else:
+                # Assume it's a file path - convert to base64
+                import base64
+                import mimetypes
+                try:
+                    with open(content, 'rb') as image_file:
+                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                        mime_type = mimetypes.guess_type(content)[0] or 'image/jpeg'
+                        return {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{encoded_string}"}
+                        }
+                except Exception as e:
+                    logger.error(f"Failed to process image file {content}: {e}")
+                    return {
+                        "type": "text",
+                        "text": f"[Error processing image: {content}]"
+                    }
+        elif isinstance(content, dict):
+            # Already in the correct format or needs minor adjustments
+            if "type" in content:
+                return content
+            elif "url" in content:
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": content["url"]}
+                }
+            else:
+                logger.warning(f"Unknown image content format: {content}")
+                return {
+                    "type": "text", 
+                    "text": f"[Unknown image format: {content}]"
+                }
+        else:
+            logger.warning(f"Unsupported image content type: {type(content)}")
+            return {
+                "type": "text",
+                "text": f"[Unsupported image type: {type(content)}]"
+            }
 
     def _create_payload(
         self,
         inputs: Union[str, List[Dict], Dict],
+        images: Optional[List] = None,
         cot: bool = False,
         until: Optional[Union[str, List[str]]] = None,
         **kwargs,
@@ -119,9 +169,11 @@ class OpenAIModel(BaseModel):
         If using the Chat API, constructs a messages list with an optional system message.
         If CoT is enabled, appends the CoT trigger to the prompt.
         If 'until' is provided, adds it as a stop sequence.
+        If images are provided, formats them for vision models.
 
         Args:
             inputs: The input prompt (string or pre-constructed list/dict for messages).
+            images: Optional list of images for vision models.
             cot (bool): Whether to enable chain-of-thought prompting.
             until (Optional[Union[str, List[str]]]): Stop sequence(s) for generation.
             **kwargs: Additional parameters.
@@ -138,21 +190,35 @@ class OpenAIModel(BaseModel):
             if self.system_message:
                 messages.append(
                     {"role": "system", "content": self.system_message})
+            
             if isinstance(inputs, str):
                 prompt_text = inputs
                 if cot and self.cot_trigger:
                     prompt_text += f"\n{self.cot_trigger}\n"
-                messages.append({"role": "user", "content": prompt_text})
+                
+                # Handle vision inputs
+                if images and self.is_vision_model:
+                    content = [{"type": "text", "text": prompt_text}]
+                    for image in images:
+                        content.append(self._process_image_content(image))
+                    messages.append({"role": "user", "content": content})
+                else:
+                    messages.append({"role": "user", "content": prompt_text})
             elif isinstance(inputs, list):
                 messages.extend(inputs)
             else:
                 messages.append({"role": "user", "content": str(inputs)})
+            
             payload = {"model": self.model_name, "messages": messages}
             if until is not None:
                 if isinstance(until, str):
                     until = [until]
                 payload["stop"] = until
         else:
+            # Completions API doesn't support vision, so we ignore images
+            if images and self.is_vision_model:
+                logger.warning("Vision inputs provided but using Completions API. Images will be ignored.")
+            
             prompt_text = inputs if not (
                 cot and self.cot_trigger) else f"{inputs}\n{self.cot_trigger}\n"
             payload = {"model": self.model_name, "prompt": prompt_text}
@@ -217,8 +283,12 @@ class OpenAIModel(BaseModel):
     ) -> Dict[str, Any]:
         """Send a single request using the OpenAI async client with retries."""
         effective_retries = max_retries if max_retries is not None else self.max_retries
+        
+        # Extract text and images from the item
+        text_input, images = self._extract_text_and_images(item)
+        
         payload = self._create_payload(
-            item["input"], cot=cot, until=until, **kwargs)
+            text_input, images=images, cot=cot, until=until, **kwargs)
 
         attempt = 0
         while attempt <= effective_retries:
