@@ -99,6 +99,10 @@ class BenchHubDataset(BaseDataset):
         hf_load_kwargs: Optional[Dict[str, Any]] = None, # HuggingFace load_dataset에 전달할 추가 인자
         **kwargs 
     ):
+        # Remove duplicate arguments from kwargs to prevent conflicts
+        kwargs.pop('subset', None)
+        kwargs.pop('split', None)
+        
         super().__init__(
             dataset_name=dataset_name,
             split=split,
