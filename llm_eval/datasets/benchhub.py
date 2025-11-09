@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Any
 
 from llm_eval.datasets.base import BaseDataset
 from llm_eval.datasets import register_dataset
-from llm_eval.utils.logging import get_logger # HRET 로거 사용
+from llm_eval.utils.logging import get_logger
 
 logger = get_logger(name="benchhub_dataset", level="INFO")
 
@@ -19,12 +19,22 @@ def _fix_value_to_str(value: Any) -> str:
 
 def _ensure_list_of_str(value: Any) -> List[str]:
     """Helper function to ensure the value is a list of strings."""
-    if pd.isna(value) or value is None:
+    if value is None:
         return []
     if isinstance(value, list):
-        return [_fix_value_to_str(v) for v in value]
+        # Check for empty list or list with None values
+        if len(value) == 0:
+            return []
+        return [_fix_value_to_str(v) for v in value if v is not None]
+    # For scalar values, check if it's NaN
+    try:
+        if pd.isna(value):
+            return []
+    except (TypeError, ValueError):
+        # If pd.isna() fails (e.g., for certain objects), continue
+        pass
     if isinstance(value, str):
-        # 문자열인 경우, 파이프(|)로 분리된 형태일 수 있다고 가정 (필요시 수정)
+        # Handle pipe-separated strings
         return [v.strip() for v in value.split("|") if v.strip()]
     return [_fix_value_to_str(value)]
 
@@ -90,13 +100,15 @@ class BenchHubDataset(BaseDataset):
         split: str = "train",
         language: str = "ko",
         base_prompt_template: Optional[str] = None,
+        sample_size: Optional[int] = None,
+        seed: Optional[int] = None,
         problem_types: Optional[List[str]] = None,
         task_types: Optional[List[str]] = None,
         target_types: Optional[List[str]] = None,
         subject_types: Optional[List[str]] = None,
         benchmark_names: Optional[List[str]] = None,
-        chunk_size: int = 1000, #
-        hf_load_kwargs: Optional[Dict[str, Any]] = None, # HuggingFace load_dataset에 전달할 추가 인자
+        chunk_size: int = 1000,
+        hf_load_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs 
     ):
         # Remove duplicate arguments from kwargs to prevent conflicts
@@ -116,6 +128,8 @@ class BenchHubDataset(BaseDataset):
             raise ValueError("Language must be 'ko' or 'en'.")
         self.repo_id = f"BenchHub/BenchHub-{ 'Ko' if self.language == 'ko' else 'En' }"
         
+        self.sample_size = sample_size
+        self.seed = seed
         self.filter_problem_types = problem_types
         self.filter_task_types = task_types
         self.filter_target_types = target_types
@@ -124,7 +138,6 @@ class BenchHubDataset(BaseDataset):
         self.chunk_size = chunk_size
         
         self.hf_load_kwargs = hf_load_kwargs if hf_load_kwargs else {}
-        self.hf_load_kwargs.setdefault('trust_remote_code', True)
         self.hf_load_kwargs.setdefault('name', 'default')
 
 
@@ -156,10 +169,12 @@ class BenchHubDataset(BaseDataset):
             for i in range(0, total_samples, self.chunk_size):
                 chunk_split = f"{self.split}[{i}:{min(i + self.chunk_size, total_samples)}]"
                 try:
-                    ds_chunk = load_dataset(self.repo_id, name=self.hf_load_kwargs.get('name'), split=chunk_split, features=self.EXPECTED_FEATURES, **{k:v for k,v in self.hf_load_kwargs.items() if k!='name'})
+                    ds_chunk = load_dataset(self.repo_id, name=self.hf_load_kwargs.get('name'), split=chunk_split, **{k:v for k,v in self.hf_load_kwargs.items() if k!='name'})
 
                 except Exception as e_chunk:
+                    import traceback
                     logger.error(f"Error loading chunk {chunk_split}: {e_chunk}. Skipping this chunk.")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     continue
                 
                 if ds_chunk:
@@ -175,9 +190,11 @@ class BenchHubDataset(BaseDataset):
                 chunk_split = f"{self.split}[{current_pos}:{current_pos + self.chunk_size}]"
                 logger.debug(f"Attempting to load chunk: {chunk_split}")
                 try:
-                    ds_chunk = load_dataset(self.repo_id, name=self.hf_load_kwargs.get('name'), split=chunk_split, features=self.EXPECTED_FEATURES, **{k:v for k,v in self.hf_load_kwargs.items() if k!='name'})
-                except Exception as e_chunk: # 예: split 범위 초과 등
+                    ds_chunk = load_dataset(self.repo_id, name=self.hf_load_kwargs.get('name'), split=chunk_split, **{k:v for k,v in self.hf_load_kwargs.items() if k!='name'})
+                except Exception as e_chunk:
+                    import traceback
                     logger.info(f"Finished loading chunks or error in chunk {chunk_split}: {e_chunk}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     break 
                 
                 if not ds_chunk or len(ds_chunk) == 0:
@@ -189,12 +206,21 @@ class BenchHubDataset(BaseDataset):
                 processed_samples_count += len(ds_chunk)
                 logger.debug(f"Processed {len(ds_chunk)} samples in chunk. Filtered down to {len(filtered_chunk)}. Total HRET samples so far: {len(all_filtered_data)}")
                 
-                if len(ds_chunk) < self.chunk_size: # 마지막 청크일 가능성
+                if len(ds_chunk) < self.chunk_size:
                     logger.info("Loaded a partial chunk, assuming end of dataset.")
                     break
                 current_pos += self.chunk_size
         
         logger.info(f"Finished loading. Total HRET formatted samples: {len(all_filtered_data)} from {processed_samples_count} scanned BenchHub samples.")
+        
+        # Apply sample_size and seed if specified
+        if self.sample_size is not None and self.sample_size < len(all_filtered_data):
+            import random
+            if self.seed is not None:
+                random.seed(self.seed)
+            all_filtered_data = random.sample(all_filtered_data, self.sample_size)
+            logger.info(f"Applied sample_size={self.sample_size}. Final sample count: {len(all_filtered_data)}")
+        
         return all_filtered_data
 
     def _filter_dataset_object(self, dataset_obj: Dataset) -> Dataset:
@@ -215,7 +241,6 @@ class BenchHubDataset(BaseDataset):
         """Converts a filtered datasets.Dataset object to HRET's list of dicts format."""
         hret_list = []
         for item in dataset_obj:
-            # HRET "input" 구성
             input_text_parts = []
             context = _fix_value_to_str(item.get("context"))
             prompt = _fix_value_to_str(item.get("prompt"))
@@ -227,9 +252,13 @@ class BenchHubDataset(BaseDataset):
 
             if self.base_prompt_template:
                 try:
-                    # format_map을 위해 item의 모든 값을 문자열로 변환
                     format_args = {k: _fix_value_to_str(v) for k, v in item.items()}
-                    format_args["query"] = query_for_template # {query}는 특별히 준비
+                    format_args["query"] = query_for_template
+                    # Add options_str for MCQA templates
+                    options = _ensure_list_of_str(item.get("options"))
+                    if options:
+                        options_str = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(options)])
+                        format_args["options_str"] = options_str
                     hret_input = self.base_prompt_template.format_map(format_args)
                 except KeyError as e:
                     logger.warning(f"Prompt template key {e} not found in item. Using raw query for input. Item keys: {list(item.keys())}")
@@ -237,7 +266,10 @@ class BenchHubDataset(BaseDataset):
             else:
                 hret_input = query_for_template
 
-            hret_reference = _fix_value_to_str(item.get("answer"))
+            # Prioritize answer_str, then answer, then reference
+            hret_reference = _fix_value_to_str(
+                item.get("answer_str") or item.get("answer") or item.get("reference")
+            )
 
             hret_options = _ensure_list_of_str(item.get("options"))
             
@@ -245,7 +277,7 @@ class BenchHubDataset(BaseDataset):
                 "problem_type": _fix_value_to_str(item.get("problem_type")),
                 "task_type": _fix_value_to_str(item.get("task_type")),
                 "target_type": _fix_value_to_str(item.get("target_type")),
-                "subject_type": _ensure_list_of_str(item.get("subject_type")), # 리스트 유지
+                "subject_type": _ensure_list_of_str(item.get("subject_type")),
                 "benchmark_name": _fix_value_to_str(item.get("benchmark_name")),
                 "mcqa_meta": _fix_value_to_str(item.get("mcqa_meta")),
                 "original_category": _fix_value_to_str(item.get("original_category")),
