@@ -339,11 +339,14 @@ class OpenAIModel(BaseModel):
     ) -> List[Dict[str, Any]]:
         """Internal async helper for batch generation."""
         logger.info(f"Starting batch generation for {len(inputs)} items.")
-        results: List[Dict[str, Any]] = []
-        async with self.client as client:
-            tasks = [
-                self._send_single_request_async(
-                    client,
+        
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(self.batch_size)
+        
+        async def bounded_request(item):
+            async with semaphore:
+                return await self._send_single_request_async(
+                    self.client,
                     item,
                     return_logits,
                     until,
@@ -351,33 +354,35 @@ class OpenAIModel(BaseModel):
                     max_retries=max_retries,
                     **kwargs,
                 )
-                for item in inputs
-            ]
-            for item, task in zip(
-                inputs,
-                tqdm(
-                    asyncio.as_completed(tasks),
-                    total=len(tasks),
-                    desc="Generating outputs",
-                    disable=not show_progress,
-                ),
-            ):
-                try:
-                    res = await task
-                    merged = deepcopy(item)
-                    merged.update(res)
-                    results.append(merged)
-                except Exception as e:
-                    logger.error(f"OpenAI error: {str(e)}")
-                    error_item = deepcopy(item)
-                    error_item.update({
-                        "error": str(e),
-                        "prediction": None,
-                        "finish_reason": "error",
-                    })
-                    results.append(error_item)
+        
+        # Create tasks for all inputs
+        tasks = [bounded_request(item) for item in inputs]
+        
+        # Use gather to maintain order - this is critical!
+        try:
+            results_ordered = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"Batch generation failed: {e}")
+            results_ordered = [{"error": str(e), "prediction": None, "finish_reason": "error"}] * len(inputs)
+        
+        # Merge results with inputs in correct order
+        final_results = []
+        for item, res in zip(inputs, results_ordered):
+            if isinstance(res, Exception):
+                logger.error(f"OpenAI error: {str(res)}")
+                merged = deepcopy(item)
+                merged.update({
+                    "error": str(res),
+                    "prediction": None,
+                    "finish_reason": "error",
+                })
+            else:
+                merged = deepcopy(item)
+                merged.update(res)
+            final_results.append(merged)
+        
         logger.info("Batch generation completed.")
-        return results
+        return final_results
 
     def generate_batch(
         self,
