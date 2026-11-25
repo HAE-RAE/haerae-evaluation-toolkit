@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 # Try to import the evaluation module, skip tests if dependencies are missing
@@ -55,3 +57,29 @@ def test_evaluator_evaluate(eval_key):
         assert "samples" in results, "Results should contain 'samples' key."
     except Exception as e:
         pytest.fail(f"Evaluator {eval_key} failed during evaluate() call: {e}")
+
+def test_math_match_plain_reference_and_cot_prediction():
+    """math_match credits a correct \\boxed{} answer against a plain reference.
+
+    HRM8K references are bare numbers such as "18.0", and its prompt asks for
+    the final answer in \\boxed{} after the reasoning.
+    """
+    evaluator = get_evaluator("math_match")
+    samples = [
+        {"prediction": "풀이: 9 * 2 = 18\n\\boxed{18}", "reference": "18.0"},
+        {"prediction": "풀이: 9 * 2 = 17\n\\boxed{17}", "reference": "18.0"},
+        {"prediction": "\\boxed{3}", "reference": "3"},
+    ]
+    metrics = evaluator.evaluate_predictions(samples)
+    assert [s["evaluation"]["is_correct"] for s in samples] == [True, False, True]
+    assert metrics["accuracy"] == pytest.approx(2 / 3)
+    assert metrics["parse_failure_rate"] == 0.0
+    json.dumps(samples)  # per-sample records must stay JSON serializable
+
+
+def test_math_match_counts_unparseable_prediction_as_parse_failure():
+    evaluator = get_evaluator("math_match")
+    samples = [{"prediction": "모르겠습니다", "reference": "18.0"}]
+    metrics = evaluator.evaluate_predictions(samples)
+    assert metrics["accuracy"] == 0.0
+    assert metrics["parse_failure_rate"] == 1.0

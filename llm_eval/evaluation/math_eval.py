@@ -102,18 +102,30 @@ class MathMatchEvaluator(BaseEvaluator):
             return text
 
         # Use extract_final_answer function to get the final answer portion
-        text = extract_final_answer(text)
+        extracted = extract_final_answer(text)
+        if extracted == text:
+            # No answer marker: keep the whole output so math_verify can
+            # find the answer (e.g. a trailing \boxed{}) anywhere in it.
+            return text
         # Split into lines and return the first non-empty line
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return lines[0] if lines else text
+        lines = [line.strip() for line in extracted.splitlines() if line.strip()]
+        return lines[0] if lines else extracted
 
-    def parse_math(self, text: str) -> Any:
+    def parse_math(self, text: str, is_reference: bool = False) -> Any:
         """
         Parses mathematical expressions using math_verify.
         Returns the parsed mathematical object or None if parsing fails.
+
+        References are usually bare expressions without LaTeX delimiters
+        (e.g. "18.0"), which LaTeX extraction does not pick up, so a
+        reference that yields nothing is retried wrapped in "$...$".
         """
         try:
-            return parse(text, extraction_config=self.extraction_config)
+            parsed = parse(text, extraction_config=self.extraction_config)
+            if not parsed and is_reference and text.strip():
+                parsed = parse(f"${text.strip()}$", extraction_config=self.extraction_config)
+            # math_verify returns an empty list when it finds nothing.
+            return parsed if parsed else None
         except Exception as e:
             logger.warning(f"Failed to parse mathematical expression: {text}")
             logger.warning(f"Error: {str(e)}")
@@ -165,7 +177,7 @@ class MathMatchEvaluator(BaseEvaluator):
 
             # Parse mathematical expressions
             parsed_pred = self.parse_math(extracted_pred)
-            parsed_ref = self.parse_math(extracted_ref)
+            parsed_ref = self.parse_math(extracted_ref, is_reference=True)
 
             fallback_used = False
             # If parsing fails for either expression, fall back to string equality
@@ -189,8 +201,9 @@ class MathMatchEvaluator(BaseEvaluator):
             sample["evaluation"] = {
                 "extracted_pred": extracted_pred,
                 "extracted_ref": extracted_ref,
-                "parsed_pred": parsed_pred,
-                "parsed_ref": parsed_ref,
+                # Stored as strings: sympy objects are not JSON serializable.
+                "parsed_pred": [str(x) for x in parsed_pred] if parsed_pred else None,
+                "parsed_ref": [str(x) for x in parsed_ref] if parsed_ref else None,
                 "is_correct": is_correct,
                 "fallback_used": fallback_used
             }
