@@ -602,7 +602,9 @@ class HuggingFaceModel(BaseModel):
                 truncation=True, # Ensure truncation if prompts are too long
                 max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 2048 # Default max length
             )
-            input_lens = encoded["attention_mask"].sum(dim=1).tolist()
+            # With left padding, every row's generated tokens start after the
+            # padded prompt width, not after that row's unpadded length.
+            input_lens = [encoded["input_ids"].shape[1]] * encoded["input_ids"].shape[0]
         
         # Move to device if not distributed. If distributed, inputs stay on CPU.
         # The model.generate() call handles internal transfers.
