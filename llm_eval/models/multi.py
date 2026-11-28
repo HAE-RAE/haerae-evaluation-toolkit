@@ -61,7 +61,7 @@ class MultiModel:
         if generate_model is not None:
             g_name = generate_model.get("name")
             g_params = generate_model.get("params", {})
-            logger.info(f"[MultiModel] Loading generate model: {g_name} with {g_params}")
+            logger.info(f"[MultiModel] Loading generate model: {g_name}")
             loaded = load_model(g_name, **g_params)
             if not isinstance(loaded, BaseModel):
                 raise ValueError(f"Loaded generate_model is not a BaseModel: {type(loaded)}")
@@ -71,7 +71,7 @@ class MultiModel:
         if judge_model is not None:
             j_name = judge_model.get("name")
             j_params = judge_model.get("params", {})
-            logger.info(f"[MultiModel] Loading judge model: {j_name} with {j_params}")
+            logger.info(f"[MultiModel] Loading judge model: {j_name}")
             loaded = load_model(j_name, **j_params)
             if not isinstance(loaded, BaseJudge):
                 raise ValueError(f"Loaded judge_model is not a BaseJudge: {type(loaded)}")
@@ -81,7 +81,7 @@ class MultiModel:
         if reward_model is not None:
             r_name = reward_model.get("name")
             r_params = reward_model.get("params", {})
-            logger.info(f"[MultiModel] Loading reward model: {r_name} with {r_params}")
+            logger.info(f"[MultiModel] Loading reward model: {r_name}")
             loaded = load_model(r_name, **r_params)
             if not isinstance(loaded, BaseRewardModel):
                 raise ValueError(f"Loaded reward_model is not a BaseRewardModel: {type(loaded)}")

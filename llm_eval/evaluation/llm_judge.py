@@ -79,15 +79,15 @@ class K2EvalResponseParser(ResponseParser):
 
 class GoldComparisonParser(ResponseParser):
     def parse(self, response: str, model_name: str = None) -> Dict[str, Any]:
-        resp_lower = response.lower()
-        if "[[true]]" in resp_lower:
-            return {"correct": True, "model_name": model_name or "unknown"}
-        elif "[[false]]" in resp_lower:
-            step_pattern = r"step:\s*\[(\d+)\]"
-            match = re.search(step_pattern, response, flags=re.IGNORECASE)
-            step = int(match.group(1)) if match else None
-            return {"correct": False, "step": step, "model_name": model_name or "unknown"}
-        raise ValueError(f"No valid verdict found in response: {response}")
+        verdicts = set(re.findall(r"\[\[(true|false)\]\]", response.lower()))
+        if len(verdicts) != 1:
+            raise ValueError("Expected an unambiguous [[true]] or [[false]] verdict")
+        correct = verdicts == {"true"}
+        parsed = {"correct": correct, "model_name": model_name or "unknown"}
+        if not correct:
+            match = re.search(r"step:\s*\[(\d+)\]", response, flags=re.IGNORECASE)
+            parsed["step"] = int(match.group(1)) if match else None
+        return parsed
 
 
 class ResponseComparisonParser(ResponseParser):
@@ -144,7 +144,8 @@ class LLMJudgeEvaluator(BaseEvaluator):
         total_score = 0.0
         score_count = 0
         total_correct = 0
-        total_items = len(samples)
+        verdict_count = 0
+        parse_failures = 0
 
         batch_inputs = []
         batch_indices = []
@@ -213,32 +214,31 @@ class LLMJudgeEvaluator(BaseEvaluator):
                                 sample["judge_score"] = score
                                 total_score += score
                                 score_count += 1
-                    elif j_type == JudgeType.RESPONSE_COMPARISON:
-                        # Use a pairwise comparison parser.
-                        parser = self.parsers.get(JudgeType.RESPONSE_COMPARISON)
+                    elif j_type in (JudgeType.RUBRIC_RESPONSE_AND_GOLD, JudgeType.RESPONSE_COMPARISON):
+                        verdict_count += 1
+                        evaluation = {"raw_output": judge_response}
+                        sample["evaluation"] = evaluation
                         try:
-                            parsed = parser.parse(judge_response)
-                            sample["evaluation"] = {
-                                "raw_output": judge_response,
-                                "parsed": parsed,
-                            }
-                            if "winner" in parsed:
-                                winner = parsed["winner"]
-                                sample["judge_winner"] = winner
-                                sample["evaluation"]["winner"] = winner
-                                if winner == "A":
-                                    model_name = sample.get("model_a", "unknown")
-                                else:
-                                    model_name = sample.get("model_b", "unknown")
-                                sample["evaluation"]["parsed"]["model_name"] = model_name
-                                is_correct = sample.get("reference") == winner
-                                sample["evaluation"]["is_correct"] = is_correct
-                                sample["judge_correct"] = is_correct
-                                if is_correct:
-                                    total_correct += 1
-                        except ValueError as e:
-                            logger.error(f"Error parsing response comparison: {e}")
-                    # For other judge types, similar processing can be added.
+                            parsed = self.parsers[j_type].parse(judge_response or "")
+                        except ValueError as exc:
+                            parse_failures += 1
+                            sample["judge_correct"] = None
+                            sample.pop("judge_winner", None)
+                            evaluation.update(is_correct=None, error=str(exc))
+                            continue
+
+                        if j_type == JudgeType.RESPONSE_COMPARISON:
+                            winner = parsed["winner"]
+                            sample["judge_winner"] = evaluation["winner"] = winner
+                            model_key = "model_a" if winner == "A" else "model_b"
+                            parsed["model_name"] = sample.get(model_key, "unknown")
+                            is_correct = sample.get("reference") == winner
+                        else:
+                            is_correct = parsed["correct"]
+
+                        evaluation.update(parsed=parsed, is_correct=is_correct)
+                        sample["judge_correct"] = is_correct
+                        total_correct += int(is_correct)
 
             except Exception as e:
                 logger.error(f"Error in judge_batch: {e}")
@@ -247,10 +247,8 @@ class LLMJudgeEvaluator(BaseEvaluator):
         metrics = {}
         if score_count > 0:
             metrics["average_judge_score"] = total_score / score_count
-        if total_items > 0 and any(
-            sample.get("judge_type", self.default_judge_type.value) == JudgeType.RESPONSE_COMPARISON.value 
-            for sample in samples
-        ):
-            metrics["judge_accuracy"] = total_correct / total_items
+        if verdict_count:
+            metrics["judge_accuracy"] = total_correct / verdict_count
+            metrics["judge_parse_failures"] = parse_failures
 
         return metrics

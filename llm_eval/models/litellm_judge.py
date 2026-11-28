@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any, Optional, Union
 
 import litellm
-from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio
 
 from . import register_model
 from .base import BaseJudge
@@ -114,25 +114,19 @@ class LiteLLMJudge(BaseJudge):
         sem = asyncio.Semaphore(self.batch_size if isinstance(self.batch_size, int) else 8)
 
         async def _worker(item: Dict[str, Any]) -> Dict[str, Any]:
-            prompt = item.get("input", "")
-            payload = self._build_payload(prompt, until=until)
-            async with sem:
-                try:
-                    prediction = await self._with_retries(payload)
-                    return {"input": prompt, "prediction": prediction}
-                except Exception as e:
-                    logger.error(f"[LiteLLMJudge] Error: {e}")
-                    return {"input": prompt, "prediction": f"Error: {e}"}
-
-        tasks = [_worker(it) for it in inputs]
-        results: List[Dict[str, Any]] = []
-        for fut in tqdm(asyncio.as_completed(tasks), total=len(tasks), disable=not show_progress, desc="LiteLLM Judge Batch"):
             try:
-                results.append(await fut)
-            except Exception as e:
-                logger.error(f"[LiteLLMJudge] Task failure: {e}")
-                results.append({"input": None, "prediction": f"Error: {e}"})
-        return results
+                payload = self._build_payload(item.get("input", ""), until=until)
+                async with sem:
+                    prediction = await self._with_retries(payload)
+                return {**item, "prediction": prediction}
+            except Exception as exc:
+                logger.error("[LiteLLMJudge] Judging failed: %s", exc)
+                return {**item, "prediction": "", "error": str(exc), "finish_reason": "error"}
+
+        return await tqdm_asyncio.gather(
+            *(_worker(item) for item in inputs), disable=not show_progress,
+            desc="LiteLLM Judge Batch",
+        )
 
     def judge_batch(
         self,
