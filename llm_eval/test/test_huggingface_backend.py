@@ -69,3 +69,17 @@ def test_batched_generation_excludes_prompt_tokens(tiny_model_dir,
     results = model.generate_batch(inputs, batch_size=3, show_progress=False)
 
     assert [r["prediction"] for r in results] == ["x y z"] * 3
+
+
+def test_mixed_batch_preserves_sample_order(tiny_model_dir, monkeypatch):
+    model = HuggingFaceModel(model_name_or_path=tiny_model_dir, device="cpu")
+    monkeypatch.setattr(model, "_score_option", lambda prompt, option: -1.0)
+    monkeypatch.setattr(model, "_generate_normal", lambda items, *args, **kwargs: [
+        {**item, "prediction": "generated"} for item in items
+    ])
+    rows = [{"input": "a"}, {"input": "b", "options": ["x"]}, {"input": "c"}]
+    results = model.generate_batch(rows, batch_size=3, return_logits=True, show_progress=False)
+    assert results[1]["logits"]["sum_log_prob"] == -1.0
+    assert [(row["input"], row["prediction"]) for row in results] == [
+        ("a", "generated"), ("b", "x"), ("c", "generated")
+    ]

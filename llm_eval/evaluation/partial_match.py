@@ -130,6 +130,9 @@ class PartialMatchEvaluator(BaseEvaluator):
             pred_norm = self.parse_prediction(sample.get("prediction", ""))
             ref_norm = self.parse_prediction(sample.get("reference", ""))
 
+            if not ref_norm:
+                raise ValueError("partial_match requires a non-empty normalized reference")
+
             if self.mcqa and "options" in sample and isinstance(sample["options"], list) and sample["options"]:
                 # Normalize candidate options
                 normalized_options = [self._normalize_text(opt) for opt in sample["options"]]

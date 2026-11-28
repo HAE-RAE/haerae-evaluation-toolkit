@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any, Optional, Union, Callable, Tuple
 
 import litellm
-from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio
 
 from . import register_model
 from .base import BaseModel
@@ -191,7 +191,6 @@ class LiteLLMBackend(BaseModel):
         else:
             completion_kwargs["model"] = self.model_name
         
-        logger.debug(f"[LiteLLMBackend] Prepared completion kwargs: {completion_kwargs}")
         return completion_kwargs
 
     async def _generate_once_async(self, completion_kwargs: Dict[str, Any]) -> str:
@@ -235,7 +234,7 @@ class LiteLLMBackend(BaseModel):
         # Optional runtime override of batch_size
         if batch_size is not None:
             if isinstance(batch_size, str) and batch_size.lower() == "auto":
-                self.batch_size = min(len(inputs), 8)
+                self.batch_size = max(1, min(len(inputs), 8))
                 logger.info(f"[LiteLLMBackend] Using auto batch size: {self.batch_size}")
             elif isinstance(batch_size, int) and batch_size > 0:
                 self.batch_size = batch_size
@@ -264,44 +263,28 @@ class LiteLLMBackend(BaseModel):
         semaphore = asyncio.Semaphore(self.batch_size if isinstance(self.batch_size, int) else 8)
 
         async def _worker(item: Dict[str, Any]) -> Dict[str, Any]:
-            # Extract text and images from the item
-            text_input, images = self._extract_text_and_images(item)
-            reference = item.get("reference", "")
-            completion_kwargs = self._prepare_completion_kwargs(text_input, images=images, until=until)
-            async with semaphore:
-                try:
+            try:
+                text_input, images = self._extract_text_and_images(item)
+                payload = self._prepare_completion_kwargs(text_input, images=images, until=until)
+                async with semaphore:
                     prediction = await self._generate_with_retry_async(
-                        completion_kwargs,
+                        payload,
                         max_attempts=getattr(self, "retry_max", 3),
                         initial_wait=getattr(self, "retry_base_delay", 1.0),
                     )
-                    result_item = {
-                        "input": item.get("input", ""),
-                        "reference": reference,
-                        "prediction": prediction,
-                    }
-                    if self.cot and self.cot_parser:
-                        try:
-                            chain_of_thought, final_answer = self.cot_parser(prediction)
-                            result_item["chain_of_thought"] = chain_of_thought
-                            result_item["prediction"] = final_answer
-                        except Exception as e:
-                            logger.warning(f"[LiteLLMBackend] CoT parsing failed: {e}")
-                    return result_item
-                except Exception as e:
-                    logger.error(f"[LiteLLMBackend] Error generating completion: {str(e)}")
-                    return {
-                        "input": prompt,
-                        "reference": reference,
-                        "prediction": f"Error: {str(e)}",
-                    }
+            except Exception as exc:
+                logger.error("[LiteLLMBackend] Generation failed: %s", exc)
+                return {**item, "prediction": "", "error": str(exc), "finish_reason": "error"}
 
-        tasks = [_worker(item) for item in inputs]
-        results: List[Dict[str, Any]] = []
-        for fut in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="LiteLLM Batch Generation", disable=not show_progress):
-            try:
-                results.append(await fut)
-            except Exception as e:
-                logger.error(f"[LiteLLMBackend] Task failed: {e}")
-                results.append({"input": None, "reference": None, "prediction": f"Error: {e}"})
-        return results
+            result = {**item, "prediction": prediction}
+            if self.cot and self.cot_parser:
+                try:
+                    result["chain_of_thought"], result["prediction"] = self.cot_parser(prediction)
+                except Exception as exc:
+                    logger.warning("[LiteLLMBackend] CoT parsing failed: %s", exc)
+            return result
+
+        return await tqdm_asyncio.gather(
+            *(_worker(item) for item in inputs), disable=not show_progress,
+            desc="LiteLLM Batch Generation",
+        )

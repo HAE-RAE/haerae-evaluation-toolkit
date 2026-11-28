@@ -101,10 +101,16 @@ class GenericFileDataset(BaseDataset):
         """
         df = self._load_dataframe()
 
+        missing = {self.input_col, self.reference_col}.difference(df.columns)
+        if missing:
+            raise ValueError(f"Missing required dataset columns: {sorted(missing)}")
+
         result = []
-        for row in df.to_dict(orient="records"):
-            input_val = row.get(self.input_col, "")
-            ref_val = row.get(self.reference_col, "")
+        for row_number, row in enumerate(df.to_dict(orient="records"), start=1):
+            input_val = row[self.input_col]
+            ref_val = row[self.reference_col]
+            if (pd.api.types.is_scalar(ref_val) and pd.isna(ref_val)) or not str(ref_val).strip():
+                raise ValueError(f"Empty reference in column {self.reference_col!r}, record {row_number}")
 
             raw_input = str(input_val)
             formatted_input = (

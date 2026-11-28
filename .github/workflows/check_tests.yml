@@ -18,30 +18,19 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        run: python -m pip install uv
 
       - name: Install dependencies with uv
         run: |
           uv pip install --system -e ".[dev]"
 
-      - name: Run dataset tests
-        run: |
-          pytest llm_eval/test/test_datasets.py --cache-clear
-
-      - name: Run evaluation tests
-        run: |
-          pytest llm_eval/test/test_evaluations.py
-
-      - name: Run scaling tests
-        run: |
-          pytest llm_eval/test/test_scaling.py
+      - name: Run test suite
+        run: python -m pytest llm_eval/test/

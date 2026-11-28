@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Callable, Iterator, Tuple
 from collections import defaultdict
 
+from llm_eval.models import BaseModel, register_model
 from llm_eval.runner import PipelineRunner, PipelineConfig
 from llm_eval.utils.util import EvaluationResult
 from llm_eval.utils.logging import get_logger
@@ -181,6 +182,26 @@ class MetricsTracker:
         return comparison
 
 
+@register_model("callable")
+class FunctionModel(BaseModel):
+    """Run an in-process prediction function once per sample."""
+
+    def __init__(self, function: Callable[[str], str], **kwargs):
+        super().__init__(**kwargs)
+        self.function = function
+
+    def generate_batch(self, inputs, return_logits=False, **kwargs):
+        if return_logits:
+            raise ValueError("A text prediction function cannot supply token log probabilities.")
+        results = []
+        for item in inputs:
+            try:
+                results.append({**item, "prediction": self.function(item["input"])})
+            except Exception as exc:
+                results.append({**item, "prediction": "", "error": str(exc)})
+        return results
+
+
 class EvaluationContext:
     """Context manager for evaluation sessions."""
     
@@ -194,7 +215,7 @@ class EvaluationContext:
         self.config = PipelineConfig(
             dataset_name=dataset_name or _global_config.default_dataset,
             model_backend_name=model_backend_name or _global_config.default_model,
-            evaluation_method_name=kwargs.get('evaluation_method_name', _global_config.default_evaluation_method),
+            evaluation_method_name=kwargs.get('evaluation_method_name') or _global_config.default_evaluation_method,
             split=kwargs.get('split', _global_config.default_split),
             **{k: v for k, v in kwargs.items() if k not in ['evaluation_method_name', 'split']}
         )
@@ -210,7 +231,7 @@ class EvaluationContext:
             run_name=self.run_name,
             dataset=self.config.dataset_name,
             model=self.config.model_backend_name,
-            config=self.config.__dict__
+            config=self.config.tracking_metadata()
         )
         return self
     
@@ -231,41 +252,16 @@ class EvaluationContext:
     
     def evaluate(self, model_function: Callable[[str], str]) -> EvaluationResult:
         """Evaluate a model function."""
-        # Create a custom model backend that wraps the user function
-        class FunctionModelBackend:
-            def __init__(self, func):
-                self.func = func
-            
-            def generate_batch(self, samples):
-                results = []
-                for sample in samples:
-                    try:
-                        prediction = self.func(sample.get('input', ''))
-                        results.append({
-                            **sample,
-                            'prediction': prediction
-                        })
-                    except Exception as e:
-                        logger.error(f"Model function failed for sample: {e}")
-                        results.append({
-                            **sample,
-                            'prediction': '',
-                            'error': str(e)
-                        })
-                return results
-        
-        # This is a simplified version - in practice, you'd need to integrate
-        # the function backend with the existing model loading system
-        logger.warning("Function-based evaluation is simplified in this example")
-        
-        # For now, use the regular pipeline runner
-        runner = PipelineRunner(
-            dataset_name=self.config.dataset_name,
-            model_backend_name=self.config.model_backend_name,
-            **{k: v for k, v in self.config.__dict__.items() 
-               if k not in ['dataset_name', 'model_backend_name']}
-        )
-        
+        config = vars(self.config).copy()
+        generator_params = {"function": model_function}
+        if self.config.model_backend_name == "multi":
+            config["model_backend_params"] = {
+                **self.config.model_backend_params,
+                "generate_model": {"name": "callable", "params": generator_params},
+            }
+        else:
+            config.update(model_backend_name="callable", model_backend_params=generator_params)
+        runner = PipelineRunner(**config)
         result = runner.run()
         self.results.append(result)
         self.metrics_tracker.log_metrics(result.metrics)

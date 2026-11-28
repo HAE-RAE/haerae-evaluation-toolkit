@@ -83,3 +83,10 @@ def test_math_match_counts_unparseable_prediction_as_parse_failure():
     metrics = evaluator.evaluate_predictions(samples)
     assert metrics["accuracy"] == 0.0
     assert metrics["parse_failure_rate"] == 1.0
+
+
+@pytest.mark.parametrize("reference", ["", None, "   ", "123"])
+def test_partial_match_rejects_empty_normalized_reference(reference):
+    evaluator = get_evaluator("partial_match", ignore_numbers=True)
+    with pytest.raises(ValueError, match="non-empty normalized reference"):
+        evaluator.evaluate_predictions([{"prediction": "wrong", "reference": reference}])

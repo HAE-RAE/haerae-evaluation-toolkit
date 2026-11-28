@@ -67,6 +67,30 @@ class PipelineConfig:
             logger.warning(f"Invalid num_few_shot value: {self.num_few_shot}. Setting to 0.")
             self.num_few_shot = 0
 
+    def tracking_metadata(self) -> Dict[str, Any]:
+        """Fields suitable for saved results and external experiment trackers."""
+        metadata = {
+            key: getattr(self, key)
+            for key in (
+                "dataset_name", "subset", "split", "model_backend_name",
+                "scaling_method_name", "evaluation_method_name", "num_few_shot",
+                "few_shot_split", "language_penalize", "target_lang",
+            )
+        }
+
+        # Preserve numeric experiment settings without serializing provider-specific
+        # credentials, headers, custom callables, or arbitrary user dictionaries.
+        allowed_params = {
+            "dataset_params": ("seed", "sample_size"),
+            "model_backend_params": ("temperature", "top_p", "batch_size", "max_new_tokens", "max_tokens", "do_sample"),
+            "scaling_params": ("n", "n_paths", "beam_size", "batch_size"),
+            "evaluator_params": ("ignore_case", "ignore_numbers", "ignore_punctuation", "mcqa"),
+        }
+        for group, keys in allowed_params.items():
+            params = getattr(self, group)
+            metadata[group] = {key: params[key] for key in keys if isinstance(params.get(key), (int, float))}
+        return metadata
+
 
 class ComponentManager:
     """Manages loading and validation of pipeline components."""
@@ -103,8 +127,7 @@ class ComponentManager:
         if self.config.custom_cot_parser is not None:
             model_params["cot_parser"] = self.config.custom_cot_parser
 
-        logger.info(f"[Pipeline] Loading model backend: {self.config.model_backend_name} "
-                   f"with params={model_params}")
+        logger.info(f"[Pipeline] Loading model backend: {self.config.model_backend_name}")
         self.model = load_model(self.config.model_backend_name, **model_params)
 
     def _load_scaling_method(self) -> None:
@@ -114,8 +137,7 @@ class ComponentManager:
             return
 
         self._validate_scaling_method_allowed()
-        logger.info(f"[Pipeline] Loading scaling method: {self.config.scaling_method_name} "
-                   f"with params={self.config.scaling_params}")
+        logger.info(f"[Pipeline] Loading scaling method: {self.config.scaling_method_name}")
         self.scaler = load_scaling_method(
             self.config.scaling_method_name,
             model=self.model,
@@ -125,8 +147,7 @@ class ComponentManager:
     def _load_evaluator(self) -> None:
         """Load the evaluator component."""
         self._validate_evaluation_method_allowed()
-        logger.info(f"[Pipeline] Loading evaluator: {self.config.evaluation_method_name} "
-                   f"with params={self.config.evaluator_params}")
+        logger.info(f"[Pipeline] Loading evaluator: {self.config.evaluation_method_name}")
         
         if self.config.evaluation_method_name == "llm_judge":
             self.evaluator = get_evaluator(
@@ -214,7 +235,6 @@ class FewShotHandler:
         for key in ['num_few_shot', 'few_shot_split', 'few_shot_instruction', 'few_shot_example_template']:
             fs_dataset_params.pop(key, None)
         
-        logger.debug(f"[FewShot] Loading dataset for few-shot examples with params: {fs_dataset_params}")
         few_shot_ds_loader = load_datasets(
             name=self.config.dataset_name,
             subset=self.config.subset,

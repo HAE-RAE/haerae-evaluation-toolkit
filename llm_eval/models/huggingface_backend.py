@@ -450,7 +450,7 @@ class HuggingFaceModel(BaseModel):
                 # Process inputs in chunks.
                 for start in tqdm(range(0, len(inputs), current_bs), disable=not show_progress, desc="Processing batches"):
                     batch_items = inputs[start:start + current_bs]
-                    processed_items_in_batch = []
+                    processed_items_in_batch = list(batch_items)
 
                     # Separate MCQA items from normal generation items
                     mcqa_items_indices = []
@@ -488,6 +488,8 @@ class HuggingFaceModel(BaseModel):
                         else:
                             best_idx = option_log_probs.index(max(option_log_probs))
                             item["prediction"] = item["options"][best_idx]
+                            if return_logits:
+                                item["logits"]["sum_log_prob"] = option_log_probs[best_idx]
                         
                         # CoT parsing for MCQA (if applicable, though less common for pure scoring)
                         if self.cot and self.cot_parser: # Apply CoT parsing even if prediction is from scoring
@@ -521,9 +523,6 @@ class HuggingFaceModel(BaseModel):
                                         logger.debug(f"CoT parser failed for MCQA item prediction '{item['prediction']}': {e_parse}. Using prediction as is.")
                                         # Keep original prediction if parsing fails or doesn't apply cleanly
                             
-                        processed_items_in_batch.append(item)
-
-
                     # Process normal generation items in a batch
                     if current_prompts_for_normal_gen:
                         generated_outputs_normal = self._generate_normal(
@@ -533,13 +532,9 @@ class HuggingFaceModel(BaseModel):
                             stopping_criteria=kwargs.get("stopping_criteria"), # from above or user
                             **{k:v for k,v in kwargs.items() if k != "stopping_criteria"} # other gen kwargs
                         )
-                        processed_items_in_batch.extend(generated_outputs_normal)
-                    
-                    # The processed_items_in_batch might not be in original order if MCQA and normal items were mixed.
-                    # We need to re-sort them or ensure they are added correctly.
-                    # For simplicity, let's assume the current loop processes one batch_item at a time if mcqa is involved
-                    # or one batch of normal items.
-                    # The current logic processes MCQA items then normal items. This is fine.
+                        for index, result in zip(normal_items_indices, generated_outputs_normal, strict=True):
+                            processed_items_in_batch[index] = result
+
                     results_temp_batch.extend(processed_items_in_batch)
                 
                 results_final.extend(results_temp_batch) # Add successfully processed batch results

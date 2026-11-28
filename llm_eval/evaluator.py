@@ -37,7 +37,7 @@ def _parse_json_str(json_str: Optional[str]) -> Dict[str, Any]:
     try:
         return json.loads(json_str)
     except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse JSON string: '{json_str}'. Error: {e}. Returning empty dict.")
+        logger.warning("Invalid JSON parameter at line %d, column %d. Using defaults.", e.lineno, e.colno)
         return {}
 
 class Evaluator:
@@ -410,7 +410,7 @@ def main():
         default_few_shot_example_template=args.few_shot_example_template
     )
 
-    logger.info(f"Starting evaluation run with parsed arguments: {args}")
+    logger.info(f"Starting evaluation for dataset {args.dataset} with model {args.model}")
 
     # Call run() with parameters directly from CLI args.
     # Evaluator.run will then resolve them against its own defaults if any CLI args are None.

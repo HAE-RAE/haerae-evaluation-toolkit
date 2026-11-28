@@ -290,6 +290,12 @@ class OpenAIModel(BaseModel):
         payload = self._create_payload(
             text_input, images=images, cot=cot, until=until, **kwargs)
 
+        if return_logits:
+            if self.use_chat_api:
+                payload["logprobs"] = True
+            else:
+                payload.setdefault("logprobs", 1)
+
         attempt = 0
         while attempt <= effective_retries:
             try:
@@ -299,19 +305,25 @@ class OpenAIModel(BaseModel):
                         "prediction": response.choices[0].message.content,
                         "finish_reason": response.choices[0].finish_reason,
                     }
-                    if return_logits and hasattr(response.choices[0], "logprobs"):
-                        result["logprobs"] = response.choices[0].logprobs
                 else:
                     response = await client.completions.create(**payload)
                     result = {
                         "prediction": response.choices[0].text,
                         "finish_reason": response.choices[0].finish_reason,
                     }
-                    if return_logits and hasattr(response.choices[0], "logprobs"):
-                        result.update({
-                            "logprobs": response.choices[0].logprobs.token_logprobs,
-                            "tokens": response.choices[0].logprobs.tokens,
-                        })
+                logprobs = getattr(response.choices[0], "logprobs", None)
+                if return_logits and logprobs is not None:
+                    if self.use_chat_api:
+                        result["logprobs"] = logprobs.model_dump()
+                        token_log_probs = [entry.logprob for entry in (logprobs.content or [])]
+                    else:
+                        token_log_probs = logprobs.token_logprobs
+                        result.update(logprobs=token_log_probs, tokens=logprobs.tokens)
+                    if token_log_probs and all(p is not None for p in token_log_probs):
+                        result["logits"] = {
+                            "token_log_probs": token_log_probs,
+                            "sum_log_prob": sum(token_log_probs),
+                        }
                 if cot and self.cot_parser:
                     generated_text = result["prediction"]
                     cot_text, final_answer = self.cot_parser(generated_text)
